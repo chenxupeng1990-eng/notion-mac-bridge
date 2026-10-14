@@ -42,9 +42,9 @@
 
 ### 1.1 云端管"想"，本地管"做"，模型管"省"
 
-Notion 的 agent 额度按消息数算、且无法触达你的机器；本地跑执行类模型走自建网关的 `group/notion-cheap` 路由组（多个国产廉价模型互备）。规划审查（少量高价值 token）放云端，执行（海量低价值 token）放本地廉价路由——**同一件事的花费差一个数量级**。
+把任务规划与结果审查放在 Notion 云端，把文件、命令、代码与测试交给本机 CLI 执行。原实例使用 Magpie 的 `group/notion-cheap` 路由组调用廉价模型；读者可以使用自己已有的 CLI 登录、订阅或 API 服务，费用按各自服务计量。
 
-落地位置：`worker/` 的 `kimi_model` 指向你的网关路由组；bridge 的 `delegate_model` 同理。没有网关？把模型名换成任何 CLI 支持的模型即可，架构不变。
+Kimi、Magpie 和该路由组名都是实例配置。当前 worker 内置 Kimi/Claude Code 两种调用协议：已有 Claude Code 可直接配置使用，其他 CLI 可用适配脚本转换参数、prompt 输入和结果格式。详见 [接入自己的 CLI](CLI-ADAPTERS.md)。模型标识要使用目标 CLI 实际支持的值；bridge 的 `delegate` 则直接调用网关 API，与 worker 执行器独立。
 
 ### 1.2 工具契约向后兼容，永不破坏
 
@@ -97,7 +97,7 @@ cp config.json.example config.json
 | 键 | 说明 |
 |---|---|
 | `allowed_roots` / `workspace_dir` | 允许 agent 读写的工作区。建议单独目录，别指到家目录。 |
-| `magpie_base` / `delegate_model` / `kimi_model` | 你的廉价模型网关地址与路由组名；没有就删掉 delegate/kimi_exec 相关配置（工具仍在，只是调不通）。 |
+| `magpie_base` / `delegate_model` / `kimi_model` | 示例的网关地址与模型名。使用 `delegate`/`kimi_exec` 时按自己的服务配置；只用基础工具时可保留示例值、不调用这两个工具。`magpie_base`、`delegate_model` 目前为启动必读键，不要删除。 |
 | `port` | 默认 8760，只绑 127.0.0.1。 |
 
 ### 2.2 Token 与启动
@@ -152,7 +152,9 @@ printf 'MIAODA_WORKER_TOKEN=%s\n' "$(openssl rand -hex 24)" > ../.env
 python3 worker.py                    # 先前台跑一轮，看 claim/heartbeat 日志正常再上 launchd
 ```
 
-worker 纯标准库，不需要 venv。它做四件事：claim（长轮询 15s）→ 跑 `kimi -p "<prompt>"` 或 claude CLI（工作目录 = 任务 workdir 或 `tasks/<task_id>/`）→ 心跳续命 → 回报（脱敏 + 大结果归档）。断网时任务写进 `state/` outbox 重放，不丢。
+worker 纯标准库，不需要 venv。它做四件事：claim（长轮询 15s）→ 调用配置的本地 CLI/适配脚本（工作目录 = 任务 workdir 或 `tasks/<task_id>/`）→ 心跳续命 → 回报（脱敏 + 大结果归档）。回报失败时，已保存的结果进入 `state/` outbox，后续重放。
+
+使用已有 Claude Code 时，配置 `claude_binary`，调用时明确 `engine="claude"`；不必安装 Kimi。使用其他 CLI 时，按 [CLI 适配指南](CLI-ADAPTERS.md) 接入其无人值守参数、prompt 输入和输出协议，并把对应选择写入 Notion 指令。
 
 配置了 `bridge_url`（或跑着带 `--metrics 127.0.0.1:20241` 的 quick tunnel 时自动发现）后，worker 会把该地址登记给云端，云端于是能把 ②的 `exec`/`read_file` **直通转发**到 ① 的 `/bridge/rpc`——**不排队、不调模型、秒级返回**，且同一 `request_id` 重复提交只执行一次（幂等缓存 1 小时）。
 

@@ -2,7 +2,9 @@
 
 > Let **Notion's cloud Claude agent** (using your Notion subscription quota, not API tokens) plan, review and drive **your own Mac** through two MCP channels — a direct local bridge and a durable cloud queue — while heavy execution runs on **cheap local models behind your own gateway**.
 
-让 Notion 云端 Claude（用 Notion 自己的额度）作为规划者/审查者，通过两条 MCP 通道操作你自己的 Mac；本地执行交给廉价国产模型。方法论见 [docs/TUTORIAL.md](docs/TUTORIAL.md)。
+让 Notion 云端 Claude（用 Notion 自己的额度）作为规划者/审查者，通过两条 MCP 通道操作你自己的 Mac；本地执行交给你选择的 CLI 和模型服务。方法论见 [docs/TUTORIAL.md](docs/TUTORIAL.md)。
+
+**Kimi 和 Magpie 是实例配置。** 可以沿用 Claude Code，也可以写适配脚本接自己的 CLI；当前 worker 内置 `kimi`/`claude` 两种调用协议，替换其他 CLI 时需转换参数、prompt 输入和结果输出。具体见 [CLI 适配指南](docs/CLI-ADAPTERS.md)。代码及部署脚本目前在 macOS 上验收，Windows 需另行移植。
 
 ```
  English TL;DR
@@ -25,7 +27,7 @@
 
 | 决策 | 原因 |
 |---|---|
-| **云端只做规划/审查，本地做执行** | Notion 订阅包含云端 agent 额度但无法碰你的机器；本地跑 Kimi/Claude CLI 走自建网关的廉价路由组，不烧 API。 |
+| **云端只做规划/审查，本地做执行** | 规划与审查使用 Notion agent 额度；本地 CLI 按读者已有的登录、订阅或 API/网关配置执行。廉价模型路由是可选的成本策略。 |
 | **两条 MCP 通道并存** | ①本地桥接（cloudflared quick tunnel）延迟低、工具全，但重启换域名；②云端队列（妙搭固定 URL + Mac 常驻 worker 拉取）永远可用，隧道挂了也能排队执行。 |
 | **worker 主动外连拉任务** | 家庭网络没有公网入口；出站长连接穿过 NAT/代理，比任何入站穿透都稳。 |
 | **输出治理：head+tail 截断 + 完整日志落盘 + 分页读** | agent 上下文是稀缺资源。exec 预览只留首尾，全量在 `tasks/exec-logs/<job>.log`，用 `read_file` 按需分页；>8000 字符任务结果自动写 `result.md`。 |
@@ -48,7 +50,7 @@ docs/            教程(方法论)、故障恢复手册、Notion 端提示词
 依赖概览（完整清单见各目录与教程）：
 
 - **bridge**: `uv` · python≥3.12 · `mcp[cli]≥2.3`（含 mcp-types/starlette/uvicorn）· `pillow` · `httpx`
-- **worker**: 仅 Python≥3.10 标准库 · 需要本机装有 `kimi` 或 `claude` CLI
+- **worker**: Python≥3.10 标准库 · 本地 CLI 执行器（内置 Kimi/Claude Code 协议，其他 CLI 通过适配脚本接入；只使用 bridge 的基础工具时无需 CLI）
 - **cloud-module**: Node≥20 · NestJS 10 · `@lark-apaas/fullstack-nestjs-core`（飞书妙搭平台模板自带）· Postgres（平台内置）
 - **通道**: `cloudflared`（brew）· 可选 Google Chrome（render 工具）· 可选 ffmpeg-full（含 drawtext）
 
