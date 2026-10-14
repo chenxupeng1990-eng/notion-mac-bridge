@@ -1,0 +1,23 @@
+[project]
+name = "notion-bridge"
+version = "1.2.0"
+description = "MCP bridge: let Notion's cloud agent operate your own Mac through a bearer-token tunnel"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "httpx>=0.28.1",
+    "mcp[cli]>=2.3.0",      # MCPServer (not FastMCP); pulls in starlette, uvicorn
+    "mcp-types>=2.3.0",     # wire types (mcp_types.TextContent) — import it explicitly
+    "pillow>=12.3.0",       # view_image previews + EXIF handling
+]
+
+[project.optional-dependencies]
+# only needed by scripts/check_features.py (acceptance harness)
+acceptance = ["numpy>=2"]
+
+[project.scripts]
+notion-bridge = "notion_bridge.server:main"
+
+[build-system]
+requires = ["uv_build>=0.12.19,<0.13.0"]
+build-backend = "uv_build"

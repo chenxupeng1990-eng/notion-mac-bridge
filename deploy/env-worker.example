@@ -1,0 +1,12 @@
+# <repo root>/.env — read by worker/worker.py at startup (and by check scripts via MIAODA_ENV_PATH).
+# Generate: openssl rand -hex 32 (distinct value per channel!)
+
+# Bearer the worker presents to the cloud API ②  (== cloud env MCP_WORKER_TOKEN)
+MIAODA_WORKER_TOKEN=<hex>
+
+# Bearer Notion uses against cloud MCP ②  (== cloud env MCP_AUTH_TOKEN).
+# Only needed locally by smoke scripts; the worker itself never sends this.
+MIAODA_MCP_TOKEN=<hex>
+
+# bridge/.env carries its own copy of MIAODA_WORKER_TOKEN for the /bridge/rpc
+# verifier (env var wins; MIAODA_ENV_PATH file is the fallback). Keep them in sync.

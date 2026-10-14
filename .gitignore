@@ -1,0 +1,28 @@
+# secrets — never commit real tokens
+.env
+.env.*
+!.env.example
+!deploy/env-*.example
+
+# runtime state & outputs
+logs/
+*.log
+audit.log
+jobs/
+worker/state/
+worker/state-tmp/
+worker/worker-config.json
+bridge/config.json
+bridge/.venv/
+node_modules/
+__pycache__/
+*.pyc
+.pytest_cache/
+renders/
+
+# local tools
+.DS_Store
+.idea/
+.vscode/
+
+deploy/rendered/

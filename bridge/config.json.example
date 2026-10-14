@@ -1,0 +1,17 @@
+{
+ "allowed_roots": [
+  "~/notion-workspace"
+ ],
+ "magpie_base": "http://127.0.0.1:3425",
+ "delegate_model": "group/notion-cheap",
+ "delegate_expert_model": "group/notion-cheap",
+ "jobs_dir": "~/notion-bridge/jobs",
+ "workspace_dir": "~/notion-workspace",
+ "kimi_timeout": 300,
+ "port": 8760,
+ "max_read_lines": 400,
+ "max_search_results": 80,
+ "delegate_max_turns": 12,
+ "kimi_model": "magpie/group/notion-cheap",
+ "_comment": "Copy to config.json. ~ and $HOME in paths are expanded. See docs/TUTORIAL.md §2."
+}

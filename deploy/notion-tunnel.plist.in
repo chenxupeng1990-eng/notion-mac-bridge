@@ -1,0 +1,26 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>__LABEL__.notion-tunnel</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>__REPO__/bridge/.venv/bin/python</string>
+    <string>__REPO__/bridge/scripts/run_tunnel.py</string>
+  </array>
+  <key>WorkingDirectory</key><string>__REPO__/bridge</string>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>HOME</key><string>__HOME__</string>
+    <key>PATH</key><string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+    <key>NOTION_TUNNEL_INTERFACE</key><string>en0</string>
+  </dict>
+  <key>RunAtLoad</key><true/>
+  <key>KeepAlive</key><true/>
+  <!-- Cloudflare rate-limits quick-tunnel creation; <120s retries lock yourself out. -->
+  <key>ThrottleInterval</key><integer>120</integer>
+  <key>ExitTimeOut</key><integer>30</integer>
+  <key>StandardOutPath</key><string>__REPO__/bridge/logs/tunnel.log</string>
+  <key>StandardErrorPath</key><string>__REPO__/bridge/logs/tunnel-error.log</string>
+</dict>
+</plist>

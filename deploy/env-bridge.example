@@ -1,0 +1,11 @@
+# bridge/.env — loaded into the process environment at startup. Only place real tokens live.
+# Generate: openssl rand -hex 32
+
+# Bearer token for MCP endpoint ① (Notion "mac本地" connection uses this)
+NOTION_BRIDGE_TOKEN=<32-byte-hex>
+
+# Same value as MIAODA_WORKER_TOKEN in <repo root>/.env.
+# The bridge verifies this per request on /bridge/rpc (the endpoint ②'s
+# exec/read_file passthrough calls). Omit it and the cloud tools exec/read_file
+# stay 530 while run_task keeps working.
+MIAODA_WORKER_TOKEN=<same-hex-as-worker>

@@ -1,0 +1,10 @@
+{
+  "worker_id": "my-mac",
+  "base_url": "https://<your-app>.feishuapp.com/app/<app_XXXX>",
+  "default_workdir": "/Users/you/notion-workspace",
+  "kimi_model": "magpie/group/notion-cheap",
+  "kimi_binary": "/opt/homebrew/bin/kimi",
+  "claude_binary": "/opt/homebrew/bin/claude",
+  "bridge_host_suffixes": [".trycloudflare.com"],
+  "bridge_url": ""
+}
