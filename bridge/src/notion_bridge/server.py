@@ -544,17 +544,57 @@ async def _job_run(jid: str) -> dict:
     return result
 
 
+EXEC_MAX_WAIT = 75  # stay under the client's request timeout (~100s for Notion)
+
+
+def _log_tail(path: str, lines: int = 8, chars: int = 800) -> str:
+    try:
+        with open(path, 'rb') as f:
+            f.seek(0, 2); n = f.tell(); f.seek(max(0, n - 8192))
+            text = f.read().decode('utf-8', 'replace')
+    except OSError:
+        return ''
+    text = '\n'.join(text.replace('\r', '\n').splitlines()[-lines:])
+    return text[-chars:]
+
+
+def _running_msg(jid: str) -> str:
+    job = _JOBS[jid]
+    tail = _log_tail(job['log_path'])
+    return (f"running {jid} ({int(time.time() - job['started'])}s, still going; "
+            f"call job_wait to keep waiting)\nlog_path: {job['log_path']}"
+            + (f"\n--- log tail ---\n{tail}" if tail else ''))
+
+
+async def _wait_job(jid: str, seconds: int) -> str:
+    job = _JOBS[jid]
+    task = job.get('task')
+    if task is not None and not job['done']:
+        try:
+            # shield: if the client gives up, the command keeps running.
+            await asyncio.wait_for(asyncio.shield(task), timeout=max(1, min(int(seconds), EXEC_MAX_WAIT)))
+        except (asyncio.TimeoutError, TimeoutError):
+            return _running_msg(jid)
+        except asyncio.CancelledError:
+            raise
+    return _format_exec_result(jid, job)
+
+
 @mcp.tool()
 async def exec(cmd: str, cwd: str = "", background: bool = False,
-               max_output_chars: int = 4000, timeout_seconds: int = 120) -> str:
+               max_output_chars: int = 4000, timeout_seconds: int = 120,
+               wait_seconds: int = 45) -> str:
     """Run shell directly. Full merged stdout/stderr is saved under the
     workspace at tasks/exec-logs/<job_id>.log. Oversize previews retain
-    head+tail with a marker.
-    max_output_chars defaults to 4000; timeout_seconds defaults to 120, killing
-    the whole process group and preserving partial output. background returns a
-    job ID. cwd defaults to jobs/; custom cwd must be under an allowed root
-    (this is not an OS sandbox). A general-purpose Python with numpy/Pillow is
-    usually at <workspace>/.venv/bin/python. ffmpeg on PATH supports drawtext."""
+    head+tail with a marker. max_output_chars defaults to 4000.
+    timeout_seconds (default 120, max 86400) is the command's own limit,
+    killing the whole process group and preserving partial output. The call
+    returns after at most wait_seconds (default 45, max 75); a running job
+    keeps running and returns its job ID + log tail. Continue with job_wait.
+    background=true returns immediately. cwd defaults to jobs/; custom cwd
+    must be under an allowed root (this is not an OS sandbox). A general-purpose
+    Python with numpy/Pillow is usually at <workspace>/.venv/bin/python.
+    ffmpeg on PATH supports drawtext."""
     try:
         cwd = resolve_allowed(cwd) if cwd else JOBS_DIR
         if not os.path.isdir(cwd):
@@ -565,20 +605,30 @@ async def exec(cmd: str, cwd: str = "", background: bool = False,
         return f"[rejected] {e}"
     jid = _job_new(cmd, cwd, max_output_chars, timeout_seconds)
     audit("exec", f"{jid} cwd={cwd} bg={background}")
+    _JOBS[jid]['task'] = asyncio.create_task(_job_run(jid))
     if background:
-        _JOBS[jid]['task'] = asyncio.create_task(_job_run(jid))
-        return f"started {jid} — poll with job_status\nlog_path: {_JOBS[jid]['log_path']}"
-    return _format_exec_result(jid, await _job_run(jid))
+        return f"started {jid} — poll with job_wait / job_status\nlog_path: {_JOBS[jid]['log_path']}"
+    return await _wait_job(jid, wait_seconds)
+
+
+@mcp.tool()
+async def job_wait(job_id: str, seconds: int = 45) -> str:
+    """Wait up to `seconds` (max 75) for an exec job. Returns the full exec result
+    when done; otherwise running status + log tail (call again to keep waiting)."""
+    if job_id not in _JOBS:
+        return f"[error] unknown job: {job_id}"
+    out = await _wait_job(job_id, seconds)
+    return out if out.startswith('running') else 'done ' + out
 
 
 @mcp.tool()
 def job_status(job_id: str) -> str:
-    """Check background execution; returns head+tail preview and complete log path."""
+    """Check an exec job without waiting; returns result or running status + log tail."""
     job = _JOBS.get(job_id)
     if not job:
         return f"[error] unknown job: {job_id}"
     if not job['done']:
-        return f"running ({int(time.time()-job['started'])}s)\nlog_path: {job['log_path']}"
+        return _running_msg(job_id)
     return f"done " + _format_exec_result(job_id, job)
 
 

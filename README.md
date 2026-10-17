@@ -14,7 +14,7 @@
  Problem:   cloud agents can't touch your machine; local agents eat API quota
  Answer:    two MCP endpoints + a pull-worker:
             ① "mac local"  – cloudflared tunnel → MCP server on 127.0.0.1
-                             12 tools: exec/fs_*/view_image/render/delegate…
+                             13 tools: exec/job_wait/fs_*/view_image/render/delegate…
             ② "cloud queue" – fixed public URL (e.g. Feishu Miaoda NestJS)
                              Postgres job queue + resident Mac worker
                              survives every tunnel restart
@@ -38,7 +38,7 @@
 
 ```
 bridge/          ①本地 MCP 桥（Python 3.12, mcp 2.3 MCPServer, uvicorn）
-                 12 个工具 + /bridge/rpc 免队列直通 RPC（供②的 exec/read_file 用）
+                 13 个工具 + /bridge/rpc 免队列直通 RPC（供②的 exec/read_file 用）
 worker/          Mac 常驻拉取器（纯标准库 Python）：claim/heartbeat/result、
                  大结果落盘、tokens 脱敏、cloudflared quick-tunnel 自发现
 cloud-module/    ②妙搭(NestJS)云端 MCP 服务源码模块 + SQL 迁移：
@@ -73,6 +73,12 @@ uv run python scripts/run.py --tunnel              # 打印 https://<随机>.try
 ```
 
 云端队列、launchd 常驻、worker、验收脚本、以及**两次隧道故障的完整排查记录**，都在 **[docs/TUTORIAL.md](docs/TUTORIAL.md)**。
+
+本地 `exec` 默认等待45秒（`wait_seconds` 上限75秒）；仍运行时返回 `job_id`、日志路径和有界尾部，用 `job_wait(job_id, seconds=45)` 续等，`job_status` 立即查状态。命令自身的 `timeout_seconds` 独立计时，默认120秒；请求取消保留已启动的 job。job ID 只在当前 bridge 进程内有效，本地 `exec` 不支持 `request_id` 幂等去重。云端 `run_task` 和云端直通 `exec` 的重试契约独立，见教程。
+
+`view_image(mode="inline")` 返回原生 MCP 图片块；本地工具使用 `structured_output=False`。`info` 和 `file` 只提供元数据/本地路径，不构成视觉审查；溢出结果能否在云端 sandbox 解码并打开取决于客户端，只有实际看到图片后才能称已视觉验证。
+
+可选 named-tunnel watchdog `bridge/scripts/run_fixed_tunnel.py` 使用用户提供的配置文件和隧道名称/UUID，监测 readiness 并在网络变化后重新探测；环境变量见教程 §2.3。现有部署模板仍默认 quick tunnel，watchdog 不创建 DNS/凭据或读取 `bridge/.env`。
 
 ## 安全边界（先读这个）
 

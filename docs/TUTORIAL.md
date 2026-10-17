@@ -22,7 +22,7 @@
            │                                        │ HTTP 转发 exec/read_file
            ▼                                        │ （经 ①的 /bridge/rpc）
    bridge/（127.0.0.1:8760） ←── worker 发现隧道地址 ──┤
-   12 工具：exec/fs_*/view_image/render/…             │
+   13 工具：exec/job_wait/fs_*/view_image/render/…    │
                                                        ▼
                                             worker/（Mac 常驻 launchd）
                                             拉任务 → 跑 kimi/claude CLI
@@ -112,13 +112,39 @@ uv run python scripts/run.py --tunnel
 
 ### 2.3 接 Notion
 
-Notion → Settings → Connections → 新建 MCP：URL 填上面地址，鉴权选 Bearer Token 填 `.env` 里的值。连上后让 agent 调 `echo` 或 `exec(date)` 验证全链路。
+Notion → Settings → Connections → 新建 MCP：URL 填上面地址，鉴权选 Bearer Token 填 `.env` 里的值。连上后让 agent 调 `exec(cmd="date")` 验证全链路（`echo` 工具属于②云端连接）。
 
-> **注意**：这个域名每次重启都会变（§6.1）。变一次就得去 Notion 改一次——这正是我们做通道②的原因。想要固定域名可自建 named tunnel（`cloudflared tunnel` 官方流程，教程略）。
+> **注意**：quick tunnel 域名每次重启都会变（§6.1），需要更新①的 Notion URL。固定域名需先按 Cloudflare 官方流程创建 named tunnel、配置 DNS、凭据和 ingress，再选择下面的可选 watchdog。
 
-### 2.4 工具一览（12 个，签名见源码）
+可选 named-tunnel watchdog 为 `bridge/scripts/run_fixed_tunnel.py`，从仓库根目录运行：
 
-`fs_list` / `fs_read` / `fs_search`（只读三件套）· `fs_write` / `write_binary`（工作区内写，返回字节数+sha256）· `exec`（前台/后台/超时/截断）· `job_status` · `view_image`（inline/info/file 三模式，见 §4.4）· `fetch`（URL 下载到工作区）· `render`（headless Chrome 出图/出片）· `delegate` / `kimi_exec`（本地廉价模型干重活）。
+```bash
+NOTION_FIXED_TUNNEL_CONFIG="$HOME/.cloudflared/<你的配置>.yml" \
+NOTION_FIXED_TUNNEL_ID='<你的隧道名称或UUID>' \
+bridge/.venv/bin/python bridge/scripts/run_fixed_tunnel.py
+```
+
+配置文件由用户准备，包含凭据引用和 ingress（把自己的域名路由到 `http://127.0.0.1:8760`）；watchdog 不读取 `bridge/.env`，所需变量须由 shell 或外层 supervisor 传入。`NOTION_FIXED_TUNNEL_CONFIG` 必须指向已有文件，支持 `~`，相对路径按运行 cwd 解析；`NOTION_FIXED_TUNNEL_ID` 为实际隧道名称或 UUID。可选变量：
+
+| 环境变量 | 默认值 / 约束 |
+|---|---|
+| `CLOUDFLARED_BIN` | 从 PATH 查找，可指定二进制路径，支持 `~` |
+| `NOTION_TUNNEL_INTERFACE` | `en0`，每次重探读取当前 IPv4 |
+| `NOTION_FIXED_TUNNEL_METRICS` | `127.0.0.1:20242`，仅 loopback IPv4:port；与 quick tunnel 的20241分开 |
+| `NOTION_FIXED_TUNNEL_EDGES` | 内置公共 Cloudflare IPv4 候选；可用逗号分隔的数字 IPv4 覆盖，最多32个 |
+| `NOTION_FIXED_TUNNEL_MAX_RETRIES` | `10`，范围1..100；连续无正 readiness 的失败周期预算，健康连接重置预算；每周期最多启动两个路径的子进程 |
+
+watchdog 优先探测物理网卡绑定路径，无可达边缘或网卡无 IPv4 时尝试默认路由；绑定探测通过但子进程始终未 ready 时，也在同一周期尝试默认路由。它监测本地 `/ready`，子进程退出或240秒内无注册连接时重新读取网卡地址并探测；健康连接期间不主动轮询地址变化。轮询/重试间隔15秒。退出码0表示收到停止信号，1表示预算耗尽，2表示配置无效。它不创建隧道或 DNS，也不保证出口网络可用；可由自备 launchd supervisor 重启。现有 `render-plists.sh` 仍只生成 bridge / quick tunnel / worker 三个 plist，没有 named-watchdog 模板。
+
+named tunnel 用于②直通时，还需在 worker 显式配置自己的 `bridge_url`，并使云端 `MIAODA_BRIDGE_HOST_SUFFIXES` 允许该主机；quick-tunnel 自动发现仍使用20241，不会替你发现 named 域名。
+
+### 2.4 工具一览（13 个，签名见源码）
+
+`fs_list` / `fs_read` / `fs_search`（只读三件套）· `fs_write` / `write_binary`（工作区内写，返回字节数+sha256）· `exec`（等待预算/后台/命令超时/截断）· `job_wait` / `job_status` · `view_image`（inline/info/file 三模式，见 §5）· `fetch`（URL 下载到工作区）· `render`（headless Chrome 出图/出片）· `delegate` / `kimi_exec`（按本地配置调用模型）。
+
+本地 `exec` 的两个时间参数分开使用：`wait_seconds=45` 是本次 MCP 调用的等待预算（上限75秒）；`timeout_seconds=120` 是命令的运行上限（最大86400秒），到期才结束进程组。等待预算耗尽会返回 `running`、`job_id`、`log_path` 和有界日志尾部，命令继续运行。用 `job_wait(job_id, seconds=45)` 续等（上限75秒，完成即返回），或 `job_status(job_id)` 立即检查。`background=true` 立即返回；请求取消不会取消已启动的 job。完整日志仍在 `log_path`，尾部只是预览。
+
+`job_id` 属于当前 bridge 进程内的本地 MCP job，重启后不能恢复查询；本地 `exec` 没有 `request_id` 幂等去重，每次调用都会新建 job。默认 cwd 为配置的 jobs 目录（可用 `NOTION_BRIDGE_JOBS_DIR` 覆盖）；项目命令应显式传允许根目录内的 cwd。不要把②云端 RPC 的 `job_id` 交给①的 `job_wait`：它们是不同的执行登记表。
 
 ---
 
@@ -156,7 +182,7 @@ worker 纯标准库，不需要 venv。它做四件事：claim（长轮询 15s�
 
 使用已有 Claude Code 时，配置 `claude_binary`，调用时明确 `engine="claude"`；不必安装 Kimi。使用其他 CLI 时，按 [CLI 适配指南](CLI-ADAPTERS.md) 接入其无人值守参数、prompt 输入和输出协议，并把对应选择写入 Notion 指令。
 
-配置了 `bridge_url`（或跑着带 `--metrics 127.0.0.1:20241` 的 quick tunnel 时自动发现）后，worker 会把该地址登记给云端，云端于是能把 ②的 `exec`/`read_file` **直通转发**到 ① 的 `/bridge/rpc`——**不排队、不调模型、秒级返回**，且同一 `request_id` 重复提交只执行一次（幂等缓存 1 小时）。
+配置了 `bridge_url`（或跑着带 `--metrics 127.0.0.1:20241` 的 quick tunnel 时自动发现）后，worker 会把该地址登记给云端，云端于是能把②的 `exec`/`read_file` 直通转发到 `/bridge/rpc`，不排队、不调用模型。云端 `exec` 等待命令完成或运行超时；它不使用①本地 MCP 的45秒等待预算。同一 `request_id` 的相同命令可复用结果，幂等缓存仅在当前 bridge 进程内保留一小时；重启不保留，云端也不自动重试执行。`read_file` 没有面向调用者的 `request_id`。
 
 ### 3.4 接 Notion
 
@@ -171,40 +197,47 @@ worker 纯标准库，不需要 venv。它做四件事：claim（长轮询 15s�
 ### 4.1 launchd 三件套
 
 ```bash
+# 从仓库根目录运行；前缀只用于 launchd label
 cd deploy
-# 编辑三个 plist：把 __REPO__ 换成你的路径前缀，__LABELPREFIX__ 换成你的域名反写（如 com.example）
-sh ./render-plists.sh
-# 按 render-plists.sh 末尾打印的 launchctl bootstrap 命令加载
+bash ./render-plists.sh com.example
+# 审查 deploy/rendered/ 的结果，再按脚本打印的命令加载
 ```
 
-三个服务：bridge、tunnel（走 `scripts/run_tunnel.py`，见 §6.2 的绕行参数）、worker。验证：
+三个服务：bridge、quick tunnel（走 `bridge/scripts/run_tunnel.py`，见 §6.2 的绕行参数）、worker。验证：
 
 ```bash
-launchctl print gui/$(id -u)/com.example.notion-bridge | head
-tail -f ../../bridge/logs/bridge.log   # 路径按你的渲染结果
+launchctl print gui/$(id -u)/com.example.notion-bridge
+# 从仓库根目录查看日志
+tail -f bridge/logs/bridge.log
 ```
 
 ### 4.2 验收脚本（每条都有明确判据）
 
 ```bash
-# 50 次随机间隔连续调用，验证会话/传输稳定性（判据：全程无错误、无重连）
-NOTION_BRIDGE_URL=https://<你的隧道>/mcp uv run python scripts/check_mcp_acceptance.py
-# 功能矩阵：截断/日志/写入/二进制/路径拒绝/图片三模式/超时/后台/环境
-uv run --with numpy python scripts/check_features.py   # 需要 NOTION_BRIDGE_URL
-# worker 单元 42 项 + bridge 单元 191 项
+# 以下两个脚本从 bridge/ 运行，使用 bridge/.env 的 NOTION_BRIDGE_TOKEN
+cd bridge
+# 50 次随机间隔连续调用；--url 必填，不读取 NOTION_BRIDGE_URL 作为替代
+uv run python scripts/check_mcp_acceptance.py --url 'https://<你的隧道>/mcp'
+# 功能矩阵脚本另用 NOTION_BRIDGE_URL；会在配置的工作区创建验收文件
+NOTION_BRIDGE_URL='https://<你的隧道>/mcp' uv run --with numpy python scripts/check_features.py
+# 单元测试从仓库根目录运行（不把历史测试数当成本次验收结果）
+cd ..
 python3 -B -m unittest discover -s worker
-uv run --with pytest python -m pytest bridge/tests
+uv run --project bridge --with pytest python -m pytest bridge/tests
 ```
+
+连续调用脚本只重试只读工具发现，不自动重试 `exec`。此脚本针对①本地桥的鉴权与文本返回格式，不能直接当作②云端队列的验收脚本。②在 Notion 中分别验证 `ping`、一条有唯一 `request_id` 的 `run_task` 和 `task_status`；若需要直通，再独立验证云端 `exec`/`read_file`。
 
 ---
 
 ## 5. 日常用法速记
 
-- **小命令快速验证** → ①`exec`（head+tail 预览 + log_path）
-- **长任务 / 隧道断了** → ②`run_task` + `task_status(120)`，完成后读 `result.md`
-- **要 agent 看大输出** → ①`exec` 或 ②`exec` 拿 log_path → `read_file` 分页
-- **看图**：Notion 界面内联显示图片很贵（token）也常显示不出来。用 ①`view_image(mode="info")` 只要尺寸格式元数据，`mode="file")` 把 ≤300KB 缩略存到工作区再看文件；`mode="inline"` 保留旧行为。
-- **重复提交防御**：②的所有调用带稳定 `request_id`；重试复用，别新生成。
+- **小命令快速验证** → ①`exec`（head+tail 预览 + log_path）；仍运行时用 `job_wait` 续等。
+- **长任务 / 隧道断了** → ②`run_task` + `task_status(wait_seconds=120)`，完成后按返回路径读结果。
+- **要 agent 看大输出** → `log_path`；①用 `fs_read` 按行读取，②用 `read_file` 按 Unicode 字符分页（依赖在线的直通 RPC）。
+- **视觉审查** → ①`view_image(mode="inline", max_width=1024)` 返回原生 MCP 图片块；所有本地工具注册 `structured_output=False`，避免额外结构化输出重复载荷。`mode="info"` 只查元数据，`mode="file"` 只保存缩略图并返回路径/SHA，两者本身都不等于看过画面。
+- **inline 溢出到会话文件** → 若客户端提供 sandbox 文件读取、base64 解码和图片查看器，可从图片块恢复预览再打开；这些能力取决于客户端，不能保证每个 Notion 会话可用。不要把编码复制到对话；只有实际打开图片后才能称已视觉验证。
+- **重复提交防御** → ②`run_task` 与②`exec` 重试复用各自的稳定 `request_id`；①本地 `exec` 无幂等键，先查原 `job_id`，不要重复执行。
 
 ---
 

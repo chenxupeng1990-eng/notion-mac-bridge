@@ -23,6 +23,38 @@ class DiscoveryTests(unittest.IsolatedAsyncioTestCase):
         second = await server.list_tools()
         self.assertNotEqual(second[0].description, 'mutated')
 
+    async def test_text_output_is_not_duplicated_and_structured_output_can_opt_in(self):
+        server = CachedMCPServer('test')
+        @server.tool()
+        def echo(value: str) -> str:
+            return value
+        @server.tool(structured_output=True)
+        def structured(value: str) -> dict[str, str]:
+            return {'value': value}
+        tools = {tool.name: tool for tool in await server.list_tools()}
+        self.assertIsNone(tools['echo'].output_schema)
+        self.assertIsNotNone(tools['structured'].output_schema)
+        text = await server.call_tool('echo', {'value': 'one copy'})
+        self.assertEqual([block.text for block in text.content], ['one copy'])
+        self.assertIsNone(text.structured_content)
+        result = await server.call_tool('structured', {'value': 'opted in'})
+        self.assertEqual(result.structured_content, {'value': 'opted in'})
+
+    async def test_native_images_are_preserved_with_text_default(self):
+        from mcp.server.mcpserver import Image
+        from mcp_types import TextContent
+        server = CachedMCPServer('test')
+        @server.tool()
+        def image() -> list:
+            return [Image(data=b'image bytes', format='png'),
+                    TextContent(type='text', text='preview')]
+        result = await server.call_tool('image', {})
+        self.assertIsNone(result.structured_content)
+        self.assertEqual([block.type for block in result.content], ['image', 'text'])
+        self.assertEqual(result.content[0].mime_type, 'image/png')
+        self.assertEqual(result.content[0].data, 'aW1hZ2UgYnl0ZXM=')
+        self.assertEqual(result.content[1].text, 'preview')
+
     async def test_retry_is_only_around_discovery(self):
         server = CachedMCPServer('test')
         original = MCPServer.list_tools

@@ -72,20 +72,40 @@ cloudflared tunnel --no-autoupdate --protocol http2 \
 **定位**：worker 没心跳。`tail worker/state/launchd-error.log`；看 worker 进程；`SELECT * FROM mcp_workers`（妙搭数据库控制台）看 last_seen。
 **动作**：常见是 `MIAODA_WORKER_TOKEN` 与云端环境变量不一致（401 在 worker 日志里表现为持续失败）；或 `base_url` 写错路径（必须是 `<app-url>/mcp` 同级，worker 调用 `/worker/claim`）。worker 有 outbox，断网期间不会丢结果，恢复后自动重放。
 
-## 症状 E：exec 超时后进程没死干净
+## 症状 E：exec 返回 running、请求断开，或命令超时后仍有进程
 
-不应发生——`execution.py` 用 `start_new_session=True` + `os.killpg(SIGKILL)` 杀整组。若你看到孤儿进程，检查你的命令里是否 `nohup`/`disown` 出组。判据：`pgrep -P <job pid>`。
+先区分等待预算与命令超时：①本地 `exec(wait_seconds=45)` 最多等待75秒，返回 `running` 时命令继续；调用 `job_wait(job_id, seconds=45)` 续等，或 `job_status(job_id)` 立即查状态。请求取消也保留已启动的 job。日志尾部有界，只用于进度预览，完整输出查 `log_path`。
+
+`timeout_seconds` 才是命令的运行上限，默认120秒；到期 `execution.py` 结束进程组并返回 `timed_out=true`。若仍看到进程，检查命令是否用 `nohup`/`disown` 等脱离原组；查看进程树和产物，不能仅凭工具连接断开判断进程已停止。
+
+①本地 job ID 只在当前 bridge 进程内有效，重启后 `unknown job` 不说明命令没执行过；先检查已知 `log_path` 与产物。本地 `exec` 没有 `request_id`，重调会新建任务。②云端 `exec` 才有稳定 `request_id` 重试和 `/bridge/rpc` 一小时进程内幂等缓存；云端不自动重试，bridge 重启后先查证，不能将其 job ID 交给本地 `job_wait`。
 
 ## 症状 F：怀疑流量被代理误路由（国内变慢）
 
 先别改规则。用只读探测对比"TUN 路径 vs 物理网卡直连"的耗时 + 查实际命中规则链（代理软件的 connections API 看 `chains` 是否 DIRECT）。我们的结论：绝大多数国内域名命中 GEOIP/DOMAIN-SUFFIX DIRECT，未见误路由；**GEOSITE 兜底缺失**是常见覆盖限制——具体站点慢再针对性加规则，别全局动刀。
+
+## 症状 G：named tunnel 域名固定，但网络切换后一直无连接
+
+可选 `bridge/scripts/run_fixed_tunnel.py` watchdog 的必填环境为 `NOTION_FIXED_TUNNEL_CONFIG`（已有 cloudflared 配置文件）和 `NOTION_FIXED_TUNNEL_ID`（隧道名称或 UUID）。它不读取 `bridge/.env`；通过 shell 或自备 supervisor 传入变量。配置、凭据引用和 ingress 由用户准备，完整变量表见 [教程 §2.3](TUTORIAL.md#23-接-notion)。
+
+默认 readiness 地址为 `http://127.0.0.1:20242/ready`，与 quick tunnel 的20241分开。watchdog 每15秒检查 readiness，240秒无注册连接或子进程退出后重探；优先物理网卡路径，失败时回落默认路由。出口网络仍可能全部不可达。退出码1表示连续无健康连接的失败周期预算耗尽（默认10周期，每周期最多两个路径的子进程），2表示配置无效，0表示收到停止信号。先检查配置和日志，不要把无健康连接当作 MCP 工具错误。
+
+现有 `render-plists.sh` 没有生成 named-watchdog plist；若用于②直通，需要 worker 显式 `bridge_url` 与云端主机白名单匹配，20241的 quick-tunnel 自动发现不能提供 named 域名。
+
+## 症状 H：拿到了图片路径或元数据，但无法审查画面
+
+①`view_image(mode="inline")` 提供原生 MCP 图片块，本地工具以 `structured_output=False` 避免额外结构化载荷。`info` 只有尺寸/格式/大小，`file` 只有保存的缩略图路径和SHA；这些证据不能证明 agent 看到了图片。
+
+若 inline 结果被客户端溢出到会话文件，先确认客户端支持在云端 sandbox 读取该文件、解码图片块并用图片查看器打开。此流程依赖客户端，不能保证可用。不要反复缩小图片或把 base64 粘贴进对话来替代审查；未打开时明确标注尚未视觉验证。
 
 ---
 
 ## 恢复后的固定验收动作
 
 ```bash
-# 两条通道各跑一次最小闭环
-python scripts/check_mcp_acceptance.py --url <①URL>   # 连续调用稳定性
-python scripts/check_mcp_acceptance.py --url <②URL>   # 或直接 Notion 里跑 echo
+# 从仓库根目录进入 bridge；脚本读取 bridge/.env 的 NOTION_BRIDGE_TOKEN
+cd bridge
+uv run python scripts/check_mcp_acceptance.py --url 'https://<本地桥域名>/mcp'
 ```
+
+`--url` 必填。该脚本验证①本地工具发现和 `exec` 连续调用，不能用②的URL直接替换（鉴权和结果格式不同）。②在 Notion 中单独验证 `ping`、带唯一 `request_id` 的最小 `run_task` 和 `task_status`；需要直通时再查云端 `exec`/`read_file`。运行验收后报告实际结果，不以脚本存在或工具元数据推断已验证。

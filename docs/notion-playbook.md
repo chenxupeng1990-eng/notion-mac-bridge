@@ -12,14 +12,16 @@
 
 只有存在尚未完成的任务才调用 task_status(task_id, wait_seconds=120)，最多等120秒、完成即返回；省略wait_seconds仍默认20秒。未完成时按返回的 next_check_seconds 继续，不要空闲反复轮询。遇到服务端工具超时，先用 list_tasks 查原任务或用原 request_id 重试，避免重复执行。
 
-已知命令直接用 exec(cmd, cwd="", timeout_seconds=120, max_output_chars=4000)，不排队、不调用模型。默认目录为Notion工作区。完整stdout/stderr在log_path，返回保留首尾，超时会结束子进程组并标注timed_out=true。可选request_id最长100字符；同一执行复用原ID，不要在状态不明时用新ID重跑。云端不自动重试exec，本地ID缓存只在当前bridge进程内保留一小时，bridge重启后应先检查日志。
+妙搭连接的已知命令直接用 exec(cmd, cwd="", timeout_seconds=120, max_output_chars=4000)，不排队、不调用模型，默认目录为Notion工作区。完整stdout/stderr在log_path，返回保留首尾；命令超时会结束子进程组并标注timed_out=true。此云端exec支持可选request_id（最长100字符），重试同一执行复用原ID；云端不自动重试exec，/bridge/rpc的幂等缓存仅在当前bridge进程内保留一小时，重启后先检查日志。read_file不接受request_id。
 
-大量内容应让agent写到文件，只返回绝对路径和简短摘要。agent结果超过8000字符时worker自动保存实际工作目录result.md，返回前8000字符、result_path/result_chars/result_sha256。用read_file(path, offset=0, limit=4000)按Unicode字符分页，下一页使用next_offset，eof=true后停止；SHA可校验完整UTF-8文件。exec与read_file需要本地bridge、cloudflared隧道和worker注册在线；run_task队列独立于隧道。
+“mac本地”连接的exec是另一份契约：exec(cmd, cwd="", background=false, timeout_seconds=120, max_output_chars=4000, wait_seconds=45)。wait_seconds是本次工具调用的等待预算，上限75秒；timeout_seconds是命令自身的运行上限（默认120秒，最大86400秒）。等待结束时若仍运行，会返回job_id、log_path和有界日志尾部，命令继续执行；用job_wait(job_id, seconds=45)续等（上限75秒），或job_status(job_id)立即查状态，完成后停止查询。background=true立即返回。默认cwd为bridge配置的jobs目录；需要项目目录时显式传允许根目录内的绝对路径。本地exec没有request_id幂等去重，每次调用都会新建job；请求取消不取消已启动的job。job_id只在当前bridge进程内可查，重启后不能恢复查询，先检查log_path和实际产物，不要盲目重跑。云端RPC返回的job_id不能交给本地job_wait。
+
+大量内容应让agent写到文件，只返回绝对路径和简短摘要。agent结果超过8000字符时worker自动保存实际工作目录result.md，返回前8000字符、result_path/result_chars/result_sha256。妙搭read_file(path, offset=0, limit=4000)按Unicode字符分页，下一页使用next_offset，eof=true后停止；SHA可校验完整UTF-8文件。mac本地fs_read(path, offset=0)按行读取，不与read_file的字符offset混用。妙搭exec与read_file需要本地bridge、隧道和worker注册在线；run_task队列独立于隧道。
 
 succeeded 时审查 result 和验收证据，再向用户汇报。failed 时先看 error 和本地产物；worker失联意味着执行状态可能未知，不要盲目重跑会写文件、发消息、提交或发布的命令。需要停止时用 cancel_task；它会在worker下次心跳终止进程，但不回滚已发生的副作用。
 
 Mac、worker、所选 CLI 及其需要的模型服务和网络可用时才能执行本地任务，Mac离线时任务排队。没有任务时不会启动模型。任务指令与结果会经过并保存于妙搭；完整执行日志在Mac本地。
 
-同时使用“mac本地”连接时，图片检查优先调用view_image(path, mode="info")，只获取尺寸、格式、大小和路径。需要保存缩略图用view_image(path, mode="file", max_width=384, format="jpeg")，返回本地缩略图路径和SHA。Notion目前不能可靠显示inline图片块；不要重复缩小图片、读图片base64或把编码复制到上下文。路径不等于视觉审查，只有元数据时不要声称看过画面。妙搭连接自身没有view_image，此工具属于“mac本地”。
+同时使用“mac本地”连接时，需要视觉审查调用view_image(path, mode="inline", max_width=1024, format="jpeg")，返回原生MCP图片块和说明文字；桥接工具使用structured_output=False，避免额外结构化输出复制图片载荷。mode="info"只返回尺寸、格式、大小和路径；mode="file"保存缩略图到工作区并返回路径和SHA，两者本身都不提供视觉审查。若客户端把inline结果溢出到会话文件，能否在云端sandbox读取该文件、解码图片块的base64并用图片查看器打开，取决于客户端能力；不要把base64贴进对话，也不要为绕过显示问题反复缩小图片。只有实际看到图片后才能评价画面；不能打开时明确说尚未视觉验证。妙搭连接自身没有view_image，此工具属于“mac本地”。
 
 初次验证：调用 run_task，明确配置好的engine并省略workdir，让本地执行器在该任务的独立目录创建 notion-check.txt，写入 hello from notion，读取回验并汇报实际工作目录、文件绝对路径和内容。给该任务一个新的唯一 request_id。任务完成后停止查询。

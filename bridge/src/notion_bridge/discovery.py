@@ -12,6 +12,12 @@ class CachedMCPServer(MCPServer):
         self._discovery_cache = None
         self._discovery_lock = asyncio.Lock()
 
+    def tool(self, *args, **kwargs):
+        # Text tools would otherwise be echoed twice (content + structuredContent),
+        # doubling tokens for clients such as Notion. Opt back in per tool if needed.
+        kwargs.setdefault("structured_output", False)
+        return super().tool(*args, **kwargs)
+
     async def list_tools(self):
         if self._discovery_cache is not None:
             return copy.deepcopy(self._discovery_cache)

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ast
 import asyncio
 import codecs
 import importlib.util
@@ -341,6 +342,166 @@ class RunCommandTests(unittest.IsolatedAsyncioTestCase):
         log_path = self.log_dir / "spawn-fail.log"
         self.assertEqual(log_path.read_bytes(), b"")
         self.assertEqual(stat.S_IMODE(log_path.stat().st_mode), 0o600)
+
+
+
+# Exercise the actual server job functions without its startup config, secrets,
+# directory creation or network integrations. Only these AST nodes are loaded.
+_SERVER_PATH = _HELPER_PATH.with_name("server.py")
+_JOB_FUNCTIONS = {"_job_new", "_format_exec_result", "_job_run", "_log_tail",
+                  "_running_msg", "_wait_job", "exec", "job_wait", "job_status"}
+_job_tree = ast.parse(_SERVER_PATH.read_text())
+_job_nodes = []
+for _node in _job_tree.body:
+    if isinstance(_node, (ast.FunctionDef, ast.AsyncFunctionDef)) and _node.name in _JOB_FUNCTIONS:
+        _node.decorator_list = []
+        _job_nodes.append(_node)
+    elif isinstance(_node, ast.Assign) and any(
+            isinstance(target, ast.Name) and target.id == "EXEC_MAX_WAIT" for target in _node.targets):
+        _job_nodes.append(_node)
+import types
+import time
+import uuid
+jobs = types.ModuleType("server_jobs")
+jobs.__dict__.update(asyncio=asyncio, time=time, uuid=uuid, os=os,
+                     run_command=execution.run_command, audit=lambda *args: None)
+exec(compile(ast.Module(body=_job_nodes, type_ignores=[]), str(_SERVER_PATH), "exec"), jobs.__dict__)
+
+
+class JobWaitTests(unittest.IsolatedAsyncioTestCase):
+    def setUp(self):
+        self.temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temporary.cleanup)
+        self.root = Path(self.temporary.name).resolve()
+        jobs._JOBS = {}
+        jobs.JOBS_DIR = str(self.root)
+        jobs.EXEC_LOG_DIR = self.root / "logs"
+        jobs.resolve_allowed = lambda path: str(self.root) if path == str(self.root) else (_ for _ in ()).throw(ValueError("outside root"))
+
+    async def asyncTearDown(self):
+        tasks = [job['task'] for job in jobs._JOBS.values() if not job['task'].done()]
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+
+    def job_id(self):
+        return next(iter(jobs._JOBS))
+
+    async def test_foreground_completion_and_wait_done_result(self):
+        reply = await jobs.exec("printf complete")
+        jid = self.job_id()
+        self.assertEqual(reply, jobs._format_exec_result(jid, jobs._JOBS[jid]))
+        self.assertIn("timed_out: false", reply)
+        self.assertTrue(reply.endswith("complete"))
+        self.assertEqual(await jobs.job_wait(jid), "done " + reply)
+        self.assertEqual(jobs.job_status(jid), "done " + reply)
+
+    async def test_bounded_expiry_preserves_command_and_followup_completion(self):
+        reply = await jobs.exec(python_command("import time; print('progress', flush=True); time.sleep(1.4); print('complete')"), wait_seconds=1)
+        jid = self.job_id()
+        self.assertTrue(reply.startswith("running " + jid))
+        self.assertIn("call job_wait", reply)
+        self.assertIn("--- log tail ---\nprogress", reply)
+        self.assertFalse(jobs._JOBS[jid]['task'].done())
+        self.assertFalse(jobs._JOBS[jid]['done'])
+        done = await jobs.job_wait(jid, seconds=5)
+        self.assertTrue(done.startswith("done [exit 0]"))
+        self.assertTrue(done.endswith("progress\ncomplete\n"))
+        self.assertFalse(jobs._JOBS[jid]['task'].cancelled())
+
+    async def test_background_returns_immediately_without_waiting(self):
+        with mock.patch.object(jobs, '_wait_job', side_effect=AssertionError("background must not wait")):
+            reply = await jobs.exec("printf background", background=True)
+        jid = self.job_id()
+        self.assertTrue(reply.startswith("started " + jid))
+        self.assertIn("job_wait / job_status", reply)
+        self.assertIn(str(jobs.EXEC_LOG_DIR / f"{jid}.log"), reply)
+        done = await jobs.job_wait(jid)
+        self.assertTrue(done.endswith("background"))
+
+    async def test_cancelled_request_leaves_job_running(self):
+        started, release = asyncio.Event(), asyncio.Event()
+        async def command(cmd, cwd, jid, **kwargs):
+            started.set()
+            await release.wait()
+            return dict(code=0, output="survived", log_path=jobs._JOBS[jid]['log_path'], timed_out=False)
+        with mock.patch.object(jobs, 'run_command', command):
+            request = asyncio.create_task(jobs.exec("held command"))
+            await started.wait()
+            jid = self.job_id()
+            request.cancel()
+            with self.assertRaises(asyncio.CancelledError):
+                await request
+            self.assertFalse(jobs._JOBS[jid]['task'].done())
+            self.assertFalse(jobs._JOBS[jid]['done'])
+            waiter = asyncio.create_task(jobs.job_wait(jid))
+            await asyncio.sleep(0)
+            waiter.cancel()
+            with self.assertRaises(asyncio.CancelledError):
+                await waiter
+            self.assertFalse(jobs._JOBS[jid]['task'].done())
+            release.set()
+            self.assertTrue((await jobs.job_wait(jid)).endswith("survived"))
+
+    async def test_wait_caps_are_one_to_seventy_five_and_default_is_forty_five(self):
+        reply = await jobs.exec("printf cap", background=True)
+        jid = self.job_id()
+        actual_wait_for = asyncio.wait_for
+        captured = []
+        async def timeout(future, *, timeout):
+            captured.append(timeout)
+            future.cancel()  # Cancel only the shield wrapper, never the command.
+            raise asyncio.TimeoutError
+        with mock.patch.object(jobs.asyncio, 'wait_for', timeout):
+            for seconds in (-10, 0, 1, 45, 75, 76, 100000):
+                self.assertTrue((await jobs.job_wait(jid, seconds)).startswith("running"))
+            self.assertTrue((await jobs.job_wait(jid)).startswith("running"))
+        self.assertEqual(captured, [1, 1, 1, 45, 75, 75, 75, 45])
+        self.assertEqual(jobs.EXEC_MAX_WAIT, 75)
+        await actual_wait_for(jobs._JOBS[jid]['task'], timeout=5)
+        self.assertTrue(jobs.job_status(jid).startswith("done [exit 0]"))
+
+    async def test_unknown_job_and_existing_execution_safeguards(self):
+        self.assertEqual(await jobs.job_wait("missing"), "[error] unknown job: missing")
+        self.assertEqual(jobs.job_status("missing"), "[error] unknown job: missing")
+        for params in ({"cwd": "outside"}, {"max_output_chars": 0},
+                       {"max_output_chars": 1000001}, {"timeout_seconds": 0},
+                       {"timeout_seconds": 86401}):
+            with self.subTest(params=params):
+                self.assertTrue((await jobs.exec("true", **params)).startswith("[rejected]"))
+        self.assertEqual(jobs._JOBS, {})
+        self.assertFalse(jobs.EXEC_LOG_DIR.exists())
+
+    async def test_command_timeout_is_independent_of_request_wait(self):
+        reply = await jobs.exec(python_command("import time; print('partial', flush=True); time.sleep(60)"), timeout_seconds=1, wait_seconds=5)
+        self.assertIn("timed_out: true", reply)
+        self.assertIn("partial", reply)
+        self.assertTrue(jobs._JOBS[self.job_id()]['done'])
+
+
+class LogTailTests(unittest.TestCase):
+    def setUp(self):
+        self.temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temporary.cleanup)
+        self.path = Path(self.temporary.name) / "tail.log"
+
+    def test_missing_empty_unicode_invalid_bytes_and_carriage_returns(self):
+        self.assertEqual(jobs._log_tail(str(self.path)), "")
+        self.path.write_bytes(b"")
+        self.assertEqual(jobs._log_tail(str(self.path)), "")
+        self.path.write_bytes("old\rprogress\r汉字\n".encode() + b"bad\xff\n")
+        self.assertEqual(jobs._log_tail(str(self.path), lines=3), "progress\n汉字\nbad�")
+
+    def test_line_character_and_byte_bounds_preserve_source(self):
+        raw = b"old-prefix" * 10000 + b"\n" + b"".join(f"line-{i}\n".encode() for i in range(20))
+        self.path.write_bytes(raw)
+        expected = "\n".join(f"line-{i}" for i in range(12, 20))
+        self.assertEqual(jobs._log_tail(str(self.path)), expected)
+        self.assertEqual(jobs._log_tail(str(self.path), chars=10), expected[-10:])
+        self.path.write_bytes(b"x" * 10000)
+        self.assertEqual(jobs._log_tail(str(self.path)), "x" * 800)
+        self.assertEqual(jobs._log_tail(str(self.path), chars=10000), "x" * 8192)
+        self.assertEqual(self.path.read_bytes(), b"x" * 10000)
 
 
 if __name__ == "__main__":
